@@ -1,0 +1,20 @@
+{
+  "name": "oee-retail-mqtt-mysql",
+  "version": "1.0.0",
+  "description": "MQTT listener daemon to save OEE data to MySQL hourly and reset OEE counters",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "start:web": "set ENABLE_WEB_SERVER=true&& node index.js",
+    "mock:machine": "node mock_machine.js",
+    "mock:listener": "node mock_reset_listener.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mqtt": "^5.5.5",
+    "mysql2": "^3.9.7"
+  },
+  "author": "Antigravity",
+  "license": "ISC"
+}

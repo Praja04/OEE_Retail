@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OEE Retail - Rotary Packaging Machine D1</title>
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@400;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Top Glass Header -->
+  <header class="app-header">
+    <div class="header-title-container">
+      <div class="machine-icon-badge">
+        <i data-lucide="cpu"></i>
+      </div>
+      <div>
+        <h1 class="header-title">OEE RETAIL <span style="font-weight: 400; opacity: 0.7;">| D1</span></h1>
+        <div class="header-subtitle">
+          <span>Mesin Rotary Packaging Pouch</span>
+          <span class="badge-tag">Daemon Active</span>
+          <span class="badge-tag" style="background: rgba(139, 92, 246, 0.15); color: #c084fc; border-color: rgba(139, 92, 246, 0.3);">Topic: OEE_D1</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div class="status-pill">
+        <span class="pulse-dot"></span>
+        <span id="mqtt-status">MQTT ONLINE</span>
+      </div>
+
+      <div class="server-clock" id="clock-wib">
+        --:--:-- WIB
+      </div>
+
+      <button class="btn-reset" id="btn-manual-reset" title="Kirim Sinyal Reset RST_D1 (1 -> 500ms -> 0)">
+        <i data-lucide="rotate-ccw"></i>
+        <span>TRIGGER RESET</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Container -->
+  <div class="dashboard-container">
+
+    <!-- Top 2-Column Grid -->
+    <div class="main-grid">
+
+      <!-- Left Column: Machine Visualizer & Diagnostic Hotspots -->
+      <div class="glass-panel machine-visualizer-card glass-panel-glow">
+        <div class="card-title-bar">
+          <div class="card-title">
+            <i data-lucide="box"></i>
+            <span>Visualisasi Mesin D1</span>
+          </div>
+          <div style="font-size: 0.8rem; color: var(--text-muted);">
+            Klik <span style="color: var(--cyan-accent); font-weight: 600;">Hotspot</span> untuk Diagnostik Component
+          </div>
+        </div>
+
+        <div class="machine-stage">
+          <!-- User Machine Image -->
+          <img src="assets/machine.png" alt="Rotary Packaging Machine D1" class="machine-img" id="machine-image">
+
+          <!-- Hotspots -->
+          <div class="hotspot hotspot-1">
+            <div class="hotspot-tooltip">
+              <strong>Pouch Feeder Station</strong><br>
+              Kecepatan: 45 pouch/min<br>
+              Status: Operational
+            </div>
+          </div>
+
+          <div class="hotspot hotspot-2">
+            <div class="hotspot-tooltip">
+              <strong>Rotary Indexing Carousel</strong><br>
+              Posisi: Station 4 (Fill)<br>
+              RPM: 1800 RPM
+            </div>
+          </div>
+
+          <div class="hotspot hotspot-3">
+            <div class="hotspot-tooltip">
+              <strong>Liquid/Powder Filling Nozzle</strong><br>
+              Volume Target: 250 ml<br>
+              Akurasi: ±0.5g
+            </div>
+          </div>
+
+          <div class="hotspot hotspot-4">
+            <div class="hotspot-tooltip">
+              <strong>HMI Touch Panel PLC</strong><br>
+              Pub: RST_D1 (Reset Pulsa)<br>
+              Sub: OEE_D1
+            </div>
+          </div>
+
+          <div class="hotspot hotspot-5">
+            <div class="hotspot-tooltip">
+              <strong>Top Heat Sealing Bar</strong><br>
+              Temperatur: 185°C<br>
+              Pressure: 6.2 Bar
+            </div>
+          </div>
+        </div>
+
+        <!-- Telemetry Status Bar -->
+        <div class="telemetry-row">
+          <div class="telemetry-box">
+            <div class="telemetry-label">PNEUMATIC</div>
+            <div class="telemetry-val" style="color: var(--cyan-accent);">6.2 BAR</div>
+          </div>
+          <div class="telemetry-box">
+            <div class="telemetry-label">HEATER TEMP</div>
+            <div class="telemetry-val" style="color: var(--amber-accent);">185°C</div>
+          </div>
+          <div class="telemetry-box">
+            <div class="telemetry-label">VACUUM LEVEL</div>
+            <div class="telemetry-val" style="color: var(--purple-accent);">-85 kPa</div>
+          </div>
+          <div class="telemetry-box">
+            <div class="telemetry-label">SPEED RATE</div>
+            <div class="telemetry-val" style="color: var(--emerald-accent);">45 Ppm</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: KPI Cards Grid -->
+      <div class="kpi-grid">
+
+        <!-- Card 1: OEE Uptime (Minutes) -->
+        <div class="glass-panel kpi-card glass-panel-glow">
+          <div class="kpi-header">
+            <div>
+              <div class="kpi-title">OEE UPTIME (OEE_D1)</div>
+              <div style="font-size: 0.75rem; color: var(--text-dim);">Menit Aktif per Jam</div>
+            </div>
+            <div class="kpi-icon" style="color: var(--cyan-accent); border-color: rgba(6, 182, 212, 0.3);">
+              <i data-lucide="timer"></i>
+            </div>
+          </div>
+
+          <div style="display: flex; align-items: center; justify-content: space-between; margin: 12px 0;">
+            <div>
+              <div class="kpi-value" id="val-oee">0<span class="kpi-unit">min</span></div>
+              <div style="font-size: 0.8rem; color: var(--emerald-accent); margin-top: 4px;" id="oee-efficiency-container">
+                <span id="val-efficiency"><i data-lucide="trending-up" style="width: 14px; height: 14px; vertical-align: middle;"></i> 100% Efficiency</span>
+              </div>
+            </div>
+
+            <!-- Gauge Ring -->
+            <div class="oee-ring-container">
+              <svg class="oee-ring-svg" width="90" height="90" viewBox="0 0 90 90">
+                <defs>
+                  <linearGradient id="cyan-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stop-color="#06b6d4" />
+                    <stop offset="100%" stop-color="#3b82f6" />
+                  </linearGradient>
+                </defs>
+                <circle class="oee-ring-bg" cx="45" cy="45" r="38"></circle>
+                <circle class="oee-ring-bar" id="oee-gauge-bar" cx="45" cy="45" r="38"></circle>
+              </svg>
+              <div class="oee-ring-text" id="oee-pct">0%</div>
+            </div>
+          </div>
+
+          <div class="kpi-footer">
+            <span>Target Max: 60 min/jam</span>
+            <span style="color: var(--cyan-accent);" id="oee-status-badge">Normal</span>
+          </div>
+        </div>
+
+        <!-- Card 2: Total Product Counter (ct_productd1) -->
+        <div class="glass-panel kpi-card glass-panel-glow">
+          <div class="kpi-header">
+            <div>
+              <div class="kpi-title">TOTAL COUNTER (CT_PRODUCTD1)</div>
+              <div style="font-size: 0.75rem; color: var(--text-dim);">Output Pouch Terkemas</div>
+            </div>
+            <div class="kpi-icon" style="color: var(--emerald-accent); border-color: rgba(16, 185, 129, 0.3);">
+              <i data-lucide="package-check"></i>
+            </div>
+          </div>
+
+          <div class="kpi-value-container">
+            <div class="kpi-value" id="val-product" style="color: #6ee7b7;">0<span class="kpi-unit">pcs</span></div>
+            <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;" id="val-speed">
+              Kecepatan: ~0.0 pcs / min
+            </div>
+          </div>
+
+          <div class="kpi-footer">
+            <span>Target Shift: 30,000 pcs</span>
+            <span style="color: var(--emerald-accent);" id="val-target-pct">0.0% Target</span>
+          </div>
+        </div>
+
+        <!-- Card 3: Downtime Card (Calculated: Elapsed Minutes - Uptime) -->
+        <div class="glass-panel kpi-card glass-panel-glow">
+          <div class="kpi-header">
+            <div>
+              <div class="kpi-title">DOWNTIME (MENIT)</div>
+              <div style="font-size: 0.75rem; color: var(--text-dim);">Jam Sekarang - Uptime</div>
+            </div>
+            <div class="kpi-icon" id="downtime-icon-box" style="color: var(--emerald-accent); border-color: rgba(16, 185, 129, 0.3);">
+              <i data-lucide="alert-octagon" id="downtime-icon"></i>
+            </div>
+          </div>
+
+          <div class="kpi-value-container">
+            <div class="kpi-value" id="val-stop" style="color: #6ee7b7;">0<span class="kpi-unit">min</span></div>
+            <div style="font-size: 0.8rem; color: var(--emerald-accent); margin-top: 4px;" id="downtime-status-container">
+              <span id="downtime-status-text"><i data-lucide="check-circle-2" style="width: 14px; height: 14px; vertical-align: middle;"></i> Tidak ada Downtime</span>
+            </div>
+          </div>
+
+          <div class="kpi-footer">
+            <span id="downtime-shift-status">Status Shift: Berjalan</span>
+            <span style="color: var(--emerald-accent);" id="downtime-operation-badge">Smooth Operation</span>
+          </div>
+        </div>
+
+        <!-- Card 4: Hourly Auto Reset Countdown -->
+        <div class="glass-panel kpi-card glass-panel-glow">
+          <div class="kpi-header">
+            <div>
+              <div class="kpi-title">NEXT AUTO RESET & SAVE</div>
+              <div style="font-size: 0.75rem; color: var(--text-dim);" id="next-reset-time-label">Pukul --:00:00 WIB</div>
+            </div>
+            <div class="kpi-icon" style="color: var(--purple-accent); border-color: rgba(139, 92, 246, 0.3);">
+              <i data-lucide="clock"></i>
+            </div>
+          </div>
+
+          <div style="margin: 12px 0;">
+            <div style="font-size: 0.85rem; color: var(--text-muted);">Hitung Mundur Jam Pas:</div>
+            <div class="kpi-value" id="countdown-text" style="font-size: 1.8rem; font-family: var(--font-mono); color: #c084fc;">
+              00:00:00
+            </div>
+
+            <div class="countdown-container">
+              <div class="countdown-bar-bg">
+                <div class="countdown-bar-fill" id="countdown-bar"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="kpi-footer">
+            <span>Acuannya: Jam Server WIB</span>
+            <span style="color: var(--purple-accent);">Jam: <span id="current-jam-badge">--.00</span></span>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- Bottom 2-Column Grid -->
+    <div class="bottom-grid">
+
+      <!-- Left Bottom: Hourly Chart -->
+      <div class="glass-panel chart-card">
+        <div class="card-title-bar">
+          <div class="card-title">
+            <i data-lucide="bar-chart-3"></i>
+            <span>Grafik Performa Hourly OEE (8 Jam Terakhir)</span>
+          </div>
+          <div style="font-size: 0.8rem; color: var(--text-muted);">
+            Menit Hidup Mesin vs Output Produksi
+          </div>
+        </div>
+
+        <div class="chart-wrapper">
+          <canvas id="oeeChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Right Bottom: Database Log Table -->
+      <div class="glass-panel table-card">
+        <div class="card-title-bar">
+          <div class="card-title">
+            <i data-lucide="database"></i>
+            <span>Log Database (`oee_d1`)</span>
+          </div>
+          <button id="btn-refresh-db" style="background: none; border: none; color: var(--cyan-accent); cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 0.8rem;">
+            <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i> Refresh
+          </button>
+        </div>
+
+        <div class="table-responsive">
+          <table class="glass-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Jam</th>
+                <th>OEE (Min)</th>
+                <th>CT Product</th>
+              </tr>
+            </thead>
+            <tbody id="db-table-body">
+              <!-- Rendered via JS -->
+              <tr>
+                <td>1</td>
+                <td><span class="badge-jam">13.00</span></td>
+                <td>52 min</td>
+                <td>26,100 pcs</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <footer class="app-footer">
+    OEE Retail Packaging Machine D1 &bull; Powered by Node.js MQTT Daemon &bull; Jam Server WIB (Asia/Jakarta)
+  </footer>
+
+  <script src="app.js"></script>
+  <script>
+    lucide.createIcons();
+  </script>
+</body>
+</html>
