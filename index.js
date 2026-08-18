@@ -1,16 +1,10 @@
-const express = require('express');
-const path = require('path');
 const mqtt = require('mqtt');
-const os = require('os');
 const { pool, initializeDatabase } = require('./db');
 require('dotenv').config();
 
 // Timezone Configuration (Default: WIB / Asia/Jakarta / UTC+7)
 const timezone = process.env.TZ || 'Asia/Jakarta';
 process.env.TZ = timezone;
-
-// Port Configuration
-const PORT = process.env.PORT || 3000;
 
 // Configuration
 const brokerUrl = process.env.MQTT_BROKER || 'mqtt://10.11.11.200';
@@ -124,10 +118,55 @@ function sendResetPulse(client = mqttClient) {
   });
 }
 
+// Helper function to verify Level 2 (PLC Hardware Feedback Verification)
+// Waits up to timeoutMs to confirm PLC published OEE_D1 reset value (<= 2)
+function waitForPlcResetVerification(timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    // If lastKnownData is already reset (<= 2):
+    if (lastKnownData.oee_d1 !== null && lastKnownData.oee_d1 <= 2) {
+      return resolve({ success: true, verifiedValue: lastKnownData.oee_d1 });
+    }
+
+    let resolved = false;
+
+    const onMessageCheck = (topic, message) => {
+      if (topic === subscribeTopic) {
+        try {
+          const payload = JSON.parse(message.toString());
+          if (payload && payload.d && payload.d.OEE_D1) {
+            const val = payload.d.OEE_D1[0];
+            if (val !== null && val <= 2) {
+              resolved = true;
+              mqttClient.removeListener('message', onMessageCheck);
+              clearTimeout(timer);
+              return resolve({ success: true, verifiedValue: val });
+            }
+          }
+        } catch (e) {}
+      }
+    };
+
+    mqttClient.on('message', onMessageCheck);
+
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        mqttClient.removeListener('message', onMessageCheck);
+        if (lastKnownData.oee_d1 !== null && lastKnownData.oee_d1 <= 2) {
+          return resolve({ success: true, verifiedValue: lastKnownData.oee_d1 });
+        }
+        resolve({ success: false, reason: 'PLC counter did not return to 0 (Level 2 Hardware Verification Failed)' });
+      }
+    }, timeoutMs);
+  });
+}
+
 // Hourly execution logic: 
-// STRICT FLOW:
-// 1. READ & SAVE accumulated data to MySQL DB FIRST
-// 2. ONLY AFTER DB save succeeds, send Reset Pulse (RST_D1 = 1) via MQTT
+// DUAL-LEVEL VERIFICATION TRANSACTION FLOW:
+// 1. Simpan Data ke MySQL DB dulu (START TRANSACTION + INSERT)
+// 2. Kirim Sinyal Reset Pulse (RST_D1 = 1 -> 500ms -> 0) via MQTT (Level 1 Check: QoS 1 Network Ack)
+// 3. Verifikasi Balasan PLC (Level 2 Check: PLC Hardware Feedback OEE_D1 <= 2)
+// 4. Jika Level 1 & Level 2 BERHASIL -> COMMIT (Data permanen tersimpan di DB)
+// 5. Jika Level 1 atau Level 2 GAGAL -> ROLLBACK (Batal simpan! Data di-undo dari DB)
 async function executeHourlyProcess() {
   const serverNow = new Date();
   const wibTarget = getHourlyTargetDetails(serverNow);
@@ -143,82 +182,110 @@ async function executeHourlyProcess() {
   }
 
   // Determine accumulated OEE Uptime before reset
-  // Fallback to peakOeeThisHour if lastKnownData was zeroed out right at top-of-hour
   let oeeToSave = lastKnownData.oee_d1;
   if ((oeeToSave === null || oeeToSave === 0) && peakOeeThisHour > 0) {
     oeeToSave = peakOeeThisHour;
   }
 
   // Determine accumulated CT_Product Counter before reset
-  // Fallback to peakProductThisHour if CT_Product was zeroed out before top-of-hour
   let productToSave = lastKnownData.ct_productd1;
   if ((productToSave === null || productToSave === 0 || productToSave < peakProductThisHour) && peakProductThisHour > 0) {
     productToSave = peakProductThisHour;
   }
   if (productToSave === null) productToSave = 0;
 
-  if (oeeToSave === null) {
-    console.warn('[FLOW] No data received from machine yet. Skipping save and reset.');
+  if (oeeToSave === null || oeeToSave === 0) {
+    console.warn(`[FLOW] OEE minute is 0 (Mesin tidak jalan / libur). Skipping database save and reset.`);
+    lastProcessedHourTimestamp = wibTarget.mysqlDatetime;
+    peakOeeThisHour = 0;
+    peakProductThisHour = 0;
     console.log(`[FLOW] ===================================================`);
     return;
   }
 
-  // Mark this hour as processed to block race condition executions
-  lastProcessedHourTimestamp = wibTarget.mysqlDatetime;
-
-  // STEP 1: READ & SAVE TO DATABASE FIRST
-  let dbSavedSuccessfully = false;
+  let connection;
   try {
-    const [existingRows] = await pool.query(
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    // Check existing record
+    const [existingRows] = await connection.query(
       'SELECT id FROM oee_d1 WHERE machine_ts = ?',
       [wibTarget.mysqlDatetime]
     );
 
     if (existingRows.length > 0) {
       console.warn(`[FLOW] STEP 1 (SAVE): Data for WIB ${wibTarget.mysqlDatetime} (${wibTarget.jamLabel}) already exists in DB (ID: ${existingRows[0].id}). Skipping DB insert.`);
-      dbSavedSuccessfully = true;
-    } else {
-      const query = `
-        INSERT INTO oee_d1 (oee_d1, ct_productd1, jam, machine_ts) 
-        VALUES (?, ?, ?, ?)
-      `;
-      
-      console.log(`[FLOW] STEP 1 (SAVE): Saving accumulated data to DB BEFORE sending reset pulse:`, {
-        oee_d1: oeeToSave,
-        ct_productd1: productToSave,
-        jam: wibTarget.jamLabel,
-        machine_ts: wibTarget.mysqlDatetime
-      });
-
-      const [result] = await pool.query(query, [
-        oeeToSave,
-        productToSave,
-        wibTarget.jamLabel,
-        wibTarget.mysqlDatetime
-      ]);
-      
-      console.log(`[FLOW] STEP 1 SUCCESS: Data saved to DB with Insert ID: ${result.insertId}`);
-      dbSavedSuccessfully = true;
+      await connection.rollback();
+      lastProcessedHourTimestamp = wibTarget.mysqlDatetime;
+      console.log(`[FLOW] ===================================================`);
+      return;
     }
-  } catch (dbErr) {
-    console.error(`[FLOW] STEP 1 ERROR: Database operation failed:`, dbErr.message);
-  }
 
-  // STEP 2: ONLY AFTER SAVED TO DB -> SEND RST_D1 RESET PULSE
-  if (dbSavedSuccessfully) {
-    try {
-      console.log(`[FLOW] STEP 2 (RESET): DB save complete. Now sending RST_D1 reset pulse (1 -> 500ms -> 0)...`);
-      await sendResetPulse(mqttClient);
-      
-      // Reset peak trackers for the next hour
-      peakOeeThisHour = 0;
-      peakProductThisHour = 0;
-      console.log(`[FLOW] STEP 2 SUCCESS: Reset pulse sent and peak trackers cleared.`);
-    } catch (resetErr) {
-      console.error(`[FLOW] STEP 2 ERROR: Reset pulse failed:`, resetErr.message);
+    // STEP 1: SIMPAN DULU (STAGED IN TRANSACTION)
+    const insertQuery = `
+      INSERT INTO oee_d1 (oee_d1, ct_productd1, jam, machine_ts) 
+      VALUES (?, ?, ?, ?)
+    `;
+    
+    console.log(`[FLOW] STEP 1 (SIMPAN DULU): Staging data to DB inside Transaction BEFORE reset pulse:`, {
+      oee_d1: oeeToSave,
+      ct_productd1: productToSave,
+      jam: wibTarget.jamLabel,
+      machine_ts: wibTarget.mysqlDatetime
+    });
+
+    const [insertResult] = await connection.query(insertQuery, [
+      oeeToSave,
+      productToSave,
+      wibTarget.jamLabel,
+      wibTarget.mysqlDatetime
+    ]);
+
+    console.log(`[FLOW] STEP 1 PENDING: Data staged in DB (Insert ID: ${insertResult.insertId}). Waiting for Reset verification...`);
+
+    // STEP 2A: RESET PULSE (LEVEL 1 CHECK - MQTT QoS 1 ACK)
+    console.log(`[FLOW] STEP 2A (LEVEL 1 CHECK): Sending RST_D1 reset pulse (1 -> 500ms -> 0) via MQTT...`);
+    const resetResult = await sendResetPulse(mqttClient);
+
+    if (!resetResult || !resetResult.success) {
+      console.warn(`[FLOW] STEP 2A FAILED (LEVEL 1): Reset pulse delivery failed (${resetResult?.reason || 'Unknown'}).`);
+      await connection.rollback();
+      console.warn(`[FLOW] ROLLBACK EXECUTED: DB save CANCELLED. Counter will accumulate (e.g. 54 -> 110 min).`);
+      console.log(`[FLOW] ===================================================`);
+      return;
     }
-  } else {
-    console.warn(`[FLOW] Aborting STEP 2 (RESET) because STEP 1 (DB SAVE) did not complete successfully.`);
+
+    console.log(`[FLOW] STEP 2A PASSED (LEVEL 1): Reset pulse delivered to MQTT broker.`);
+
+    // STEP 2B: VERIFIKASI PLC RESET (LEVEL 2 CHECK - HARDWARE COUNTER RESET TO 0)
+    console.log(`[FLOW] STEP 2B (LEVEL 2 CHECK): Verifying PLC hardware feedback (waiting for OEE_D1 <= 2)...`);
+    const level2Result = await waitForPlcResetVerification(2500);
+
+    if (!level2Result.success) {
+      console.warn(`[FLOW] STEP 2B FAILED (LEVEL 2): ${level2Result.reason}`);
+      await connection.rollback();
+      console.warn(`[FLOW] ROLLBACK EXECUTED: PLC hardware did not confirm reset. DB save CANCELLED. Counter will accumulate (e.g. 54 -> 110 min).`);
+      console.log(`[FLOW] ===================================================`);
+      return;
+    }
+
+    console.log(`[FLOW] STEP 2B PASSED (LEVEL 2): PLC hardware reset confirmed (Verified OEE_D1 = ${level2Result.verifiedValue}).`);
+
+    // STEP 3: BOTH LEVEL 1 & LEVEL 2 PASSED -> COMMIT TRANSACTION
+    await connection.commit();
+    lastProcessedHourTimestamp = wibTarget.mysqlDatetime;
+    peakOeeThisHour = 0;
+    peakProductThisHour = 0;
+    console.log(`[FLOW] STEP 3 SUCCESS (COMMIT): Level 1 & Level 2 Verified! Transaction COMMITTED to DB permanently.`);
+
+  } catch (err) {
+    if (connection) {
+      try { await connection.rollback(); } catch (rbErr) {}
+    }
+    console.error(`[FLOW] ERROR during transaction process:`, err.message);
+  } finally {
+    if (connection) connection.release();
   }
 
   console.log(`[FLOW] ===================================================`);
@@ -248,59 +315,10 @@ function scheduleNextHourlyJob() {
   }, msUntilNextHour);
 }
 
-// Setup Express App
-const app = express();
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-// API Routes
-app.get('/api/status', async (req, res) => {
-  let previousHourCounter = 0;
-  try {
-    const [rows] = await pool.query('SELECT ct_productd1 FROM oee_d1 ORDER BY id DESC LIMIT 1');
-    if (rows.length > 0 && rows[0].ct_productd1 !== null) {
-      previousHourCounter = Number(rows[0].ct_productd1);
-    }
-  } catch (dbErr) {
-    console.warn('[API] Could not fetch previousHourCounter from DB:', dbErr.message);
-  }
-
-  res.json({
-    success: true,
-    lastKnownData,
-    previousHourCounter,
-    peakOeeThisHour,
-    peakProductThisHour,
-    lastProcessedHourTimestamp,
-    mqttConnected: mqttClient ? mqttClient.connected : false
-  });
-});
-
-app.get('/api/history', async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM oee_d1 ORDER BY id DESC LIMIT 8');
-    res.json(rows);
-  } catch (err) {
-    console.error('[API] Failed to fetch history:', err.message);
-    res.status(500).json({ error: 'Failed to fetch database history', details: err.message });
-  }
-});
-
-app.post('/api/reset', async (req, res) => {
-  try {
-    console.log('[API] Manual reset triggered from UI. Executing Read & Save -> Reset flow...');
-    // Force allow manual run if triggered via button
-    lastProcessedHourTimestamp = null;
-    await executeHourlyProcess();
-    res.json({ success: true, message: 'Data saved to DB and Reset pulse (RST_D1) sent successfully' });
-  } catch (err) {
-    console.error('[API] Manual reset error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 async function start() {
   console.log(`[SYSTEM] Starting OEE Retail Daemon (Timezone: ${timezone})...`);
+  console.log(`[SYSTEM] Mode Murni Database Daemon Aktif.`);
+  console.log(`[SYSTEM] Sistem berfokus 100% pada pencatatan Database MySQL & MQTT.`);
   
   // 1. Initialize Database (Non-blocking warning on failure)
   try {
@@ -309,28 +327,7 @@ async function start() {
     console.warn('[SYSTEM] Database initialization warning:', error.message);
   }
 
-  // 2. Web App Server Optional Toggle (Default: OFF for pure backend database insert)
-  const enableWebServer = process.env.ENABLE_WEB_SERVER === 'true';
-  if (enableWebServer) {
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`[HTTP] Web App Server running & ready!`);
-      console.log(`[HTTP] 💻 Komputer Ini: http://localhost:${PORT}`);
-      
-      const interfaces = os.networkInterfaces();
-      for (const name of Object.keys(interfaces)) {
-        for (const iface of interfaces[name]) {
-          if (iface.family === 'IPv4' && !iface.internal) {
-            console.log(`[HTTP] 🌐 Link Jaringan Lokal (${name}): http://${iface.address}:${PORT}`);
-          }
-        }
-      }
-    });
-  } else {
-    console.log(`[SYSTEM] Mode Murni Database Daemon Aktif.`);
-    console.log(`[SYSTEM] Port Web (3000) TIDAK dibuka. Sistem berfokus 100% pada pencatatan Database MySQL & MQTT.`);
-  }
-
-  // 3. Connect to MQTT Broker
+  // 2. Connect to MQTT Broker
   console.log(`[MQTT] Connecting to broker at ${brokerUrl}:${brokerPort}...`);
   mqttClient = mqtt.connect(brokerUrl, {
     port: brokerPort,
@@ -348,7 +345,7 @@ async function start() {
       }
     });
 
-    // 4. Start Native WIB Hourly Server-Time Scheduler
+    // 3. Start Native WIB Hourly Server-Time Scheduler
     scheduleNextHourlyJob();
   });
 

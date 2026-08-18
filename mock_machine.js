@@ -15,6 +15,21 @@ client.on('connect', () => {
   let stopShiftValue = 0;
   let ctProductValue = 26571;
 
+  const resetTopic = process.env.MQTT_TOPIC_PUB || 'RST_D1';
+  client.subscribe(resetTopic);
+
+  client.on('message', (t, msg) => {
+    if (t === resetTopic) {
+      try {
+        const p = JSON.parse(msg.toString());
+        if (p && p.RST_D1 && p.RST_D1[0] === 1) {
+          console.log(`[Mock Machine] Received Reset Signal! Resetting OEE_D1 to 0.`);
+          oeeValue = 0;
+        }
+      } catch (e) {}
+    }
+  });
+
   // Publish mock data every 5 seconds
   const interval = setInterval(() => {
     // Simulate some simple data changes over time
