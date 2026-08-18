@@ -187,7 +187,116 @@ function scheduleHourlyLoop(machines = []) {
   }, msUntilNextHour);
 }
 
+/**
+ * Executes early save & reset when STOP_SHIFT = 1 is triggered mid-hour.
+ */
+async function processMachineStopShift(machineConfig) {
+  const serverNow = new Date();
+  
+  // Calculate target next hour timestamp (e.g. at 01:34, target is 02:00:00)
+  const currentHourMs = Math.floor(serverNow.getTime() / 3600000) * 3600000;
+  const nextHourMs = currentHourMs + 3600000;
+  const wibTarget = getWibDateDetails(new Date(nextHourMs));
+  const state = machineManager.getMachineState(machineConfig.id);
+
+  if (!state) return;
+
+  console.log(`[STOP_SHIFT] [${machineConfig.id}] Triggered early save & reset at ${getWibDateDetails(serverNow).displayString} -> Target ${wibTarget.mysqlDatetime}`);
+
+  // Deduplication check
+  if (state.lastProcessedHourTimestamp === wibTarget.mysqlDatetime) {
+    console.warn(`[STOP_SHIFT] [${machineConfig.id}] Already processed for ${wibTarget.mysqlDatetime}. Skipping duplicate.`);
+    return;
+  }
+
+  let oeeToSave = state.lastKnownData.oee;
+  if ((oeeToSave === null || oeeToSave === 0) && state.peakOeeThisHour > 0) {
+    oeeToSave = state.peakOeeThisHour;
+  }
+
+  let productToSave = state.lastKnownData.product;
+  if ((productToSave === null || productToSave === 0 || productToSave < state.peakProductThisHour) && state.peakProductThisHour > 0) {
+    productToSave = state.peakProductThisHour;
+  }
+  if (productToSave === null) productToSave = 0;
+
+  if (oeeToSave === null || oeeToSave === 0) {
+    console.warn(`[STOP_SHIFT] [${machineConfig.id}] OEE minute is 0. Skipping DB save & reset.`);
+    state.lastProcessedHourTimestamp = wibTarget.mysqlDatetime;
+    machineManager.resetPeakTrackers(machineConfig.id);
+    return;
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [existingRows] = await connection.query(
+      `SELECT id FROM \`${machineConfig.tableName}\` WHERE machine_ts = ?`,
+      [wibTarget.mysqlDatetime]
+    );
+
+    if (existingRows.length > 0) {
+      console.warn(`[STOP_SHIFT] [${machineConfig.id}] Record for ${wibTarget.mysqlDatetime} already exists in DB. Skipping.`);
+      await connection.rollback();
+      state.lastProcessedHourTimestamp = wibTarget.mysqlDatetime;
+      return;
+    }
+
+    const insertQuery = `
+      INSERT INTO \`${machineConfig.tableName}\` (\`${machineConfig.oeeField}\`, \`${machineConfig.productField}\`, jam, machine_ts, is_stop_shift)
+      VALUES (?, ?, ?, ?, 1)
+    `;
+
+    console.log(`[STOP_SHIFT] [${machineConfig.id}] Staging early data (is_stop_shift = 1):`, {
+      [machineConfig.oeeField]: oeeToSave,
+      [machineConfig.productField]: productToSave,
+      jam: wibTarget.jamLabel,
+      machine_ts: wibTarget.mysqlDatetime
+    });
+
+    const [insertResult] = await connection.query(insertQuery, [
+      oeeToSave,
+      productToSave,
+      wibTarget.jamLabel,
+      wibTarget.mysqlDatetime
+    ]);
+
+    console.log(`[STOP_SHIFT] [${machineConfig.id}] Sending reset pulse via MQTT...`);
+    const resetResult = await sendResetPulse(machineConfig.topicPub, machineConfig.resetField);
+
+    if (!resetResult || !resetResult.success) {
+      console.warn(`[STOP_SHIFT] [${machineConfig.id}] Reset pulse delivery failed.`);
+      await connection.rollback();
+      return;
+    }
+
+    console.log(`[STOP_SHIFT] [${machineConfig.id}] Waiting for hardware PLC reset feedback...`);
+    const hwCheck = await waitForHardwareResetVerification(machineConfig, 8000);
+
+    if (!hwCheck.success) {
+      console.warn(`[STOP_SHIFT] [${machineConfig.id}] PLC counter reset not confirmed.`);
+      await connection.rollback();
+      return;
+    }
+
+    await connection.commit();
+    state.lastProcessedHourTimestamp = wibTarget.mysqlDatetime;
+    machineManager.resetPeakTrackers(machineConfig.id);
+
+    console.log(`[STOP_SHIFT] [${machineConfig.id}] SUCCESS: Early DB Transaction COMMITTED! Saved permanently (ID: ${insertResult.insertId}).`);
+
+  } catch (err) {
+    if (connection) await connection.rollback();
+    console.error(`[STOP_SHIFT] [${machineConfig.id}] Process error:`, err.message);
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
 module.exports = {
   scheduleHourlyLoop,
-  processAllMachinesHourly
+  processAllMachinesHourly,
+  processMachineStopShift
 };

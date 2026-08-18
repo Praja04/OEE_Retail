@@ -66,12 +66,22 @@ class MachineManager {
         state.peakProductThisHour = newProduct;
       }
 
+      const prevStop = state.lastKnownData.stop;
+
       state.lastKnownData = {
         oee: newOee,
         product: newProduct,
         stop: newStop,
         lastReceivedAt: new Date()
       };
+
+      // Trigger early save & reset if STOP_SHIFT == 1 is newly detected
+      if (newStop === 1 && prevStop !== 1) {
+        const { processMachineStopShift } = require('./hourlyScheduler');
+        processMachineStopShift(machineConfig).catch(err => {
+          console.error(`[STATE] Error executing processMachineStopShift for ${machineConfig.id}:`, err.message);
+        });
+      }
 
     } catch (err) {
       console.error(`[STATE] Error updating telemetry for Machine ${machineConfig.id}:`, err.message);

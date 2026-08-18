@@ -35,6 +35,7 @@ async function initializeAllTables(machines = []) {
           \`jam\` VARCHAR(10) NOT NULL COMMENT 'Format jam (misal 06.00)',
           \`machine_ts\` DATETIME NOT NULL COMMENT 'Timestamp jam pas (YYYY-MM-DD HH:00:00)',
           \`saved_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          \`is_stop_shift\` TINYINT DEFAULT 0 COMMENT '1 = Disimpan lebih awal karena STOP_SHIFT',
           UNIQUE KEY \`idx_unique_hour\` (\`machine_ts\`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
       `;
@@ -45,6 +46,12 @@ async function initializeAllTables(machines = []) {
         await connection.query(`ALTER TABLE \`${tableName}\` ADD UNIQUE INDEX \`idx_unique_hour\` (\`machine_ts\`)`);
       } catch (idxErr) {
         // Ignore if index already exists
+      }
+
+      try {
+        await connection.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`is_stop_shift\` TINYINT DEFAULT 0 COMMENT '1 = Disimpan lebih awal karena STOP_SHIFT'`);
+      } catch (colErr) {
+        // Ignore if column already exists
       }
 
       console.log(`[DB] Table '${tableName}' verified/created for Machine ${id}.`);
